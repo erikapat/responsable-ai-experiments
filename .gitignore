@@ -1,7 +1,36 @@
-.env
-*/.DS_Store
-.DS_Store
-.toml
-.png
-.csv
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.log
+*.tmp
 
+# ---- Virtual environments ----
+.venv/
+env/
+venv/
+.env
+
+# ---- IntelliJ IDEA ----
+.idea/
+*.iml
+
+# ---- Jupyter Notebooks checkpoints ----
+.ipynb_checkpoints/
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+*/.DS_Store
+
+# ---- Generated outputs ----
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.csv
+
+# ---- HuggingFace cache (if you want to exclude) ----
+~/.cache/huggingface/
