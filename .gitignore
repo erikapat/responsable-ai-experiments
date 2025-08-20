@@ -34,3 +34,14 @@ Thumbs.db
 
 # ---- HuggingFace cache (if you want to exclude) ----
 ~/.cache/huggingface/
+
+# Ignore JSON configs / logs
+*.json
+
+# Ignore safetensors weights
+*.safetensors
+*.bin
+
+# Ignore any fine-tuned model directories
+*/sdxl-finetuned*/
+sdxl-finetuned/
