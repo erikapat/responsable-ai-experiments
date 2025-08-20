@@ -26,7 +26,7 @@ print("Using device:", DEVICE, "| dtype:", DTYPE)
 # Load pipeline
 pipe = StableDiffusionPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE)
 # Disable safety checker (research only, NSFW content may appear)
-pipe.safety_checker = lambda images, clip_input: (images, False)
+pipe.safety_checker = lambda images, clip_input: (images, [False] * len(images))
 # Memory helpers
 try: pipe.enable_vae_tiling()
 except: pass

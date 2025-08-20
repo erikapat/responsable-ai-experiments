@@ -1,0 +1,10 @@
+Huge HF caches you downloaded earlier (FLUX, PixArt, SDXL shards can be 20–30+ GB each).
+Saving the full pipeline (UNet + 2 text encoders + VAE) in fp32 can take >7–10 GB itself.
+
+huggingface-cli scan-cache
+rm -rf ~/.cache/huggingface/hub/models--PixArt-alpha--PixArt-XL-2-1024-MS
+rm -rf ~/.cache/huggingface/hub/models--stabilityai--stable-diffusion-xl-refiner-1.0
+rm -rf ~/.cache/huggingface/hub/models--runwayml--stable-diffusion-v1-5
+rm -rf ~/.cache/huggingface/hub/models--stabilityai--stable-diffusion-2-1
+rm -rf ~/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-schnell
+rm -rf ~/.cache/huggingface/hub/models--stabilityai--stable-diffusion-xl-base-1.0

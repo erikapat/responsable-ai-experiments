@@ -158,3 +158,12 @@ for epoch in range(epochs):
                 add_time_ids = make_time_ids(H, W, B, dtype=prompt_embeds.dtype, device=unet_device)
 
         # ----------
+
+# -------------------------
+# Save finetuned pipeline
+# -------------------------
+output_dir = "sdxl-finetuned"   # or any path you prefer
+os.makedirs(output_dir, exist_ok=True)
+
+pipe.save_pretrained(output_dir)
+print(f"✅ Model saved to {output_dir}")

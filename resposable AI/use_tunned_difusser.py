@@ -97,6 +97,12 @@ def main():
         if os.path.exists(maybe_lora):
             lora_path = maybe_lora
 
+    # --- Require tuned model (finetuned or LoRA) ---
+    if not (finetuned_dir and os.path.isdir(finetuned_dir)) and not (lora_path and os.path.exists(lora_path)):
+        print("❌ No finetuned model directory or LoRA file found. Exiting.")
+        diagnose_paths(BASE_DIR)
+        return
+
     # Load pipeline
     if finetuned_dir and os.path.isdir(finetuned_dir):
         print(f"→ Loading finetuned pipeline from: {finetuned_dir}")
@@ -112,6 +118,7 @@ def main():
             torch_dtype=torch_dtype if device == "cuda" else torch.float32,
             use_safetensors=True,
         )
+
         if lora_path:
             print(f"Looking for LoRA at: {lora_path}")
             if not os.path.exists(lora_path):
