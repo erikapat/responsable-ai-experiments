@@ -1,0 +1,29 @@
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+#aws
+# 1) Make sure the venv is active
+source /home/sagemaker-user/.venv/bin/activate
+
+# 2) Confirm both point to the venv
+which python
+which pip
+python -V
+
+# 3) Install with the SAME interpreter
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 4) Verify installs
+python -m pip show diffusers transformers torch
+python - <<'PY'
+import diffusers, transformers, torch
+print("diffusers:", diffusers.__version__)
+print("transformers:", transformers.__version__)
+print("torch:", torch.__version__)
+PY
+
+# 5) Run your script with the venv python
+python "resposable AI/1-5.py"
+
