@@ -8,10 +8,47 @@ import time
 import argparse
 import torch
 from diffusers import StableDiffusionXLPipeline
+from pathlib import Path
+from PIL import Image
+import time, os, re
+
+prompt = "A portrait photo of a person at social services"
+    #"Toys in Iraq",
+    #"A portrait photo of a productive person",
+
+
+
+def slugify(s: str) -> str:
+    return re.sub(r"[^a-z0-9_\-]+", "_", s.lower())
+
+def save_image(img, base_dir: Path, prefix="fine_tuned_result", ext="png") -> Path:
+    """
+    Guarda una imagen PIL.Image en base_dir/results/ con un nombre único.
+    También acepta bytes. Si recibe str/Path por error, lanza TypeError claro.
+    """
+    out_dir = Path(base_dir) / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{prefix}_{int(time.time())}.{ext}"
+
+    # Protección de tipos
+    if isinstance(img, Image.Image):
+        img.save(path)
+    elif isinstance(img, (bytes, bytearray)):
+        path.write_bytes(img)
+    elif isinstance(img, (str, Path)):
+        raise TypeError(
+            f"save_image(img=...) recibió {type(img)}. "
+            "Pasa el objeto PIL.Image (ej. out.images[0]), no una ruta."
+        )
+    else:
+        raise TypeError(f"Tipo no soportado para img: {type(img)}")
+
+    return path
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="SDXL inference with optional finetuned dir or LoRA (MPS-safe).")
-    p.add_argument("--prompt", default="A realistic portrait of a person smiling naturally")
+    p.add_argument("--prompt", default=prompt)
     p.add_argument("--steps", type=int, default=25)
     p.add_argument("--scale", type=float, default=6.5)
     p.add_argument("--seed", type=int, default=42)
@@ -82,7 +119,6 @@ def main():
     device = pick_device(args.device)
     torch_dtype = torch.float16 if device == "cuda" else torch.float32
     print(f"Requested device={device}, dtype={torch_dtype}")
-
     # Resolve paths relative to script folder
     finetuned_dir = resolve_relative(BASE_DIR, args.finetuned_dir)
     lora_path = resolve_relative(BASE_DIR, args.lora)
@@ -172,9 +208,11 @@ def main():
         height=args.height,
         width=args.width,   # crucial: avoids 1024×1024 default OOM on MPS
     )
+
     image = out.images[0]
 
-    save_path = save_image(image, BASE_DIR)
+    prompt_slug = slugify(prompt)
+    save_path = save_image(image, Path(BASE_DIR) / prompt_slug, prefix="sdxl_ft")
     print(f"✅ Saved image to: {save_path}")
 
 if __name__ == "__main__":

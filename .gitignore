@@ -45,3 +45,6 @@ Thumbs.db
 # Ignore any fine-tuned model directories
 */sdxl-finetuned*/
 sdxl-finetuned/
+hf_cache/
+~/.cache/
+*.ckpt
