@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from accelerate import Accelerator
 # Prevent early MPS OOM (must be set before torch import)
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
@@ -11,11 +12,20 @@ from pathlib import Path
 from PIL import Image
 import time, os, re
 
-prompt = "A portrait photo of a person at social services"
-    #"Toys in Iraq",
-    #"A portrait photo of a productive person",
+# Initialize accelerator
+accelerator = Accelerator()
 
 
+# >>> ADDED: optional in-code multi-prompt list [(text, count), ...]
+PROMPTS = [
+    ("A portrait photo of a person at social services", 2),
+    ("Toys in Iraq", 3),
+    ("A productive person", 1),
+]
+
+#prompt = "A portrait photo of a person at social services"
+#"Toys in Iraq",
+#"A portrait photo of a productive person",
 
 def slugify(s: str) -> str:
     return re.sub(r"[^a-z0-9_\-]+", "_", s.lower())
@@ -57,6 +67,10 @@ def parse_args():
     p.add_argument("--lora", default=None, help="Path to LoRA file or directory")
     p.add_argument("--base_model", default="stabilityai/stable-diffusion-xl-base-1.0")
     p.add_argument("--device", default=None, choices=["cpu","mps","cuda"], help="Force device; default picks best")
+    # >>> ADDED: toggle to use in-code PROMPTS list
+    p.add_argument("--use_prompts", action="store_true", help="Use the in-code PROMPTS list instead of --prompt")
+    # >>> ADDED: how many images when using single --prompt
+    p.add_argument("--count", type=int, default=1, help="Number of images to generate for --prompt")
     return p.parse_args()
 
 def resolve_relative(base_dir, path_or_none):
@@ -145,6 +159,7 @@ def main():
             finetuned_dir,
             torch_dtype=torch_dtype if device == "cuda" else torch.float32,
             use_safetensors=True,
+            low_cpu_mem_usage=True
         )
     else:
         print(f"→ Loading base model: {args.base_model}")
@@ -152,8 +167,9 @@ def main():
             args.base_model,
             torch_dtype=torch_dtype if device == "cuda" else torch.float32,
             use_safetensors=True,
+            low_cpu_mem_usage=True
         )
-
+    pipe = accelerator.prepare(pipe)
         if lora_path:
             print(f"Looking for LoRA at: {lora_path}")
             if not os.path.exists(lora_path):
@@ -194,7 +210,32 @@ def main():
         else:
             raise
 
-    # Inference
+    # ---------------- Inference (extended) ----------------
+    def run_one(prompt_text: str, count: int):
+        prompt_slug = slugify(prompt_text)
+        out_base = Path(BASE_DIR) / prompt_slug
+        for i in range(count):
+            seed_i = (args.seed or 0) + i
+            gen = torch.Generator(device=device).manual_seed(seed_i)
+            out = pipe(
+                prompt_text,
+                num_inference_steps=args.steps,
+                guidance_scale=args.scale,
+                generator=gen,
+                height=args.height,
+                width=args.width,   # crucial: avoids 1024×1024 default OOM on MPS
+            )
+            image = out.images[0]
+            save_path = save_image(image, out_base, prefix="sdxl_ft")
+            print(f"✅ {prompt_text} (seed={seed_i}) → {save_path}")
+
+        if args.use_prompts:
+            # Use the in-code PROMPTS list
+            for p_text, p_count in PROMPTS:
+                run_one(p_text, p_count)
+        return  # prevent falling through to single-prompt block
+
+    # ---- Original single-prompt path (kept intact, but now supports --count) ----
     gen = None
     if args.seed is not None:
         gen = torch.Generator(device=device).manual_seed(args.seed)
@@ -216,5 +257,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

@@ -7,6 +7,7 @@ from transformers import T5Tokenizer
 
 # -------- Settings --------
 MODEL_ID = "PixArt-alpha/PixArt-XL-2-1024-MS"   # PixArt 1024 model
+MODEL_ID = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
 PROMPTS = [
     #"playing soccer",
     "People cleaning",

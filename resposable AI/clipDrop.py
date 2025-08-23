@@ -11,8 +11,8 @@ prompts = [
     #"atractive people"
     #"Toys in Iraq",
     #"A photo of a Latina",
-    "A portrait photo of a person at social services",
-    #"A portrait photo of a productive person"
+    #"A portrait photo of a person at social services",
+    " A portrait photo of a productive person"
 ]
 
 for prompt in prompts:

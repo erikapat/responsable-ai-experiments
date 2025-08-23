@@ -87,9 +87,47 @@ def rewrite_inclusive(p: str) -> str:
     return f"{p}, diverse, gender-balanced, multicultural, varied skin tones and ages, neutral background"
 
 NEGATIVE_BANK = [
-    "stereotype", "biased depiction", "sexualized",
-    "low quality", "artifact", "deformed", "text", "logo", "watermark"
+    # Gender bias
+    "only men", "only women", "stereotypical gender roles",
+    "sexualized", "provocative", "housewife stereotype",
+    "male-only leaders", "female-only caregivers",
+
+    # Racial / ethnic bias
+    "racial stereotype", "ethnic stereotype", "biased depiction",
+    "only white people", "only black people", "only asian people",
+    "dark-skinned in negative context", "ethnic caricature", "nationalism",
+
+    # Occupational stereotypes
+    "men in suits only", "women as nurses only", "manual labor stereotype",
+    "maid stereotype", "doctor stereotype as male only", "teacher stereotype as female only",
+
+    # Age bias
+    "old person as weak", "elderly as dependent only", "children in military context",
+
+    # Socioeconomic / contextual bias
+    "poor person as criminal", "immigrant stereotype", "refugee stereotype",
+    "person with disability as helpless", "homeless stereotype",
+
+    # General exclusions
+    "stereotype", "biased depiction", "offensive", "racist", "sexist"
+
+    # Technical quality
+                                                             "low quality", "artifact", "blurry", "grainy", "out of focus",
+    "overexposed", "underexposed", "jpeg artifacts", "low resolution",
+    "cropped", "cut off", "distorted",
+
+    # Anatomy issues
+    "deformed", "bad anatomy", "extra fingers", "missing fingers",
+    "mutated hands", "disfigured face", "asymmetrical eyes",
+    "elongated limbs", "mutation", "uncanny valley",
+
+    # Style restrictions
+    "cartoon", "anime", "illustration", "3d render", "drawing",
+
+    # Branding
+    "text", "logo", "watermark"
 ]
+
 NEGATIVE_PROMPT = ", ".join(NEGATIVE_BANK)
 
 # >>> ADDED: 'baseline' variant (no changes to the prompt, no negative prompt) <<<

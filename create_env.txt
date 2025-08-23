@@ -4,6 +4,9 @@ pip install -r requirements.txt
 
 #aws
 # 1) Make sure the venv is active
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 source /home/sagemaker-user/.venv/bin/activate
 
 # 2) Confirm both point to the venv
