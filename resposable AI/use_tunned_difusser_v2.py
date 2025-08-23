@@ -214,7 +214,7 @@ if __name__ == "__main__":
 '''
 RUN WITH:
 python use_tunned_difusser_v2.py \
-  --prompts "A portrait photo of a person at social services||Toys in Iraq||A productive person" \
+  --prompts Toys in Iraq||"A portrait photo of a person at social services \
   --counts "2||3||1" \
   --seed 123 --steps 40 --width 768 --height 768
 '''
