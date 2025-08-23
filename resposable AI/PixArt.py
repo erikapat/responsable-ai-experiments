@@ -1,5 +1,13 @@
 # pixart_generate.py
-# pixart_run.py
+'''
+This script generates images using the PixArt text-to-image model,
+handling device selection, model loading, memory optimization,
+and saving generated images. It iterates over a list of prompts,
+producing multiple images per prompt at varying resolutions while gracefully
+handling out-of-memory errors. The process logs metadata including seeds and
+parameters used for reproducibility.
+'''
+
 import os, gc, time, csv, random, pathlib
 import torch
 from diffusers import PixArtAlphaPipeline
@@ -7,7 +15,7 @@ from transformers import T5Tokenizer
 
 # -------- Settings --------
 MODEL_ID = "PixArt-alpha/PixArt-XL-2-1024-MS"   # PixArt 1024 model
-MODEL_ID = "PixArt-alpha/PixArt-Sigma-XL-2-512-MS"
+
 PROMPTS = [
     #"playing soccer",
     "People cleaning",
@@ -24,6 +32,10 @@ N_IMAGES_PER_PROMPT = 8
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
 def best_device():
+    """
+    Selects the most efficient computing device available
+    (MPS, CUDA GPU, or CPU) for model inference.
+    """
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     if torch.cuda.is_available():
@@ -38,6 +50,11 @@ print(f"Device: {DEVICE} | dtype: {DTYPE}")
 
 
 def load_pixart_pipeline(model_id: str, device: str, dtype):
+    '''
+    Loads the PixArt model pipeline with a compatible T5 tokenizer,
+    applies memory optimizations like CPU offloading, VAE tiling,
+    and attention slicing, and transfers the model to the chosen device.
+    '''
     # Try tokenizer from the model repo first (subfolder="tokenizer")
     tok = None
     try:
@@ -77,7 +94,12 @@ pipe = load_pixart_pipeline(MODEL_ID, DEVICE, DTYPE)
 # -------- CSV logger --------
 
 def get_logger(path: pathlib.Path):
-    header = ["ts","model","prompt","filename","seed","h","w","steps","cfg","device"]
+    '''
+    Initializes or appends a CSV logger that records generation
+    metadata such as timestamp, model, prompt, filename, random seed, image size, inference
+    steps, guidance scale, and device used.
+    '''
+    header = ["ts", "model", "prompt", "filename", "seed", "h", "w", "steps", "cfg", "device"]
     exists = path.exists()
     f = open(path, "a", newline="", encoding="utf-8")
     w = csv.writer(f)
@@ -87,9 +109,16 @@ def get_logger(path: pathlib.Path):
 # -------- Generation params + graceful OOM fallback --------
 BASE_SIZES = [(1024,1024), (896,896), (768,768), (640,640)]
 STEPS = 28
-CFG = 6.5
+CFG = 6.5  # guidance scale (CFG) between 3.0 and 5.0 relax the model's strict adherence to the prompt
 
 for prompt in PROMPTS:
+    # For each prompt and each image to generate:
+    # 1.Generates a random seed to ensure reproducibility.
+    # 2. Attempts image generation starting at the highest resolution (1024x1024),
+    # falling back to smaller sizes if out-of-memory errors occur.
+    # 3. Saves generated images to a prompt-named directory.
+    # 4. Logs generation details in the CSV file.
+    # 5. Cleans up memory, including clearing Apple MPS cache if applicable.
 
     outdir = pathlib.Path(prompt.lower().replace(" ", "_")) / "PixArt"
     outdir.mkdir(parents=True, exist_ok=True)

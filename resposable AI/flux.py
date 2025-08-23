@@ -1,7 +1,8 @@
 # compare_2025_t2i.py
-import os, sys, csv, time, gc, random, pathlib
-from diffusers import FluxPipeline  # diffusers>=0.31 recommended
-import os, torch
+
+# WIP: memory problems
+import csv, time, gc, random
+import torch
 
 # memory salvation
 import os, pathlib
@@ -211,5 +212,5 @@ def run_hidream(prompts, outroot, height=1024, width=1024, steps=30, guidance=4.
 run_flux(PROMPTS, OUTROOT, height=256, width=256, steps=20, guidance=3.5)
 run_hidream(PROMPTS, OUTROOT, height=1024, width=1024, steps=30, guidance=4.0)
 
-print(f"\n✅ Done. Check: {OUTROOT.resolve()}")
+print(f"\n Done. Check: {OUTROOT.resolve()}")
 print("CSV logs: flux1_dev.csv, hidream_i1_full.csv")

@@ -1,9 +1,10 @@
 from openai import OpenAI
 import base64
 
+# WIP
 client = OpenAI(api_key="TU_API_KEY_AQUI")
 
-prompt = "Un retrato fotorrealista de una científica en un laboratorio, luz suave"
+prompt = "A portrait photo of a productive person"
 
 result = client.images.generate(
     model="gpt-image-1",  # Esto es DALL·E 3

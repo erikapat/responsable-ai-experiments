@@ -134,7 +134,7 @@ def main():
 
     # --- Require tuned model (finetuned or LoRA) ---
     if not (finetuned_dir and os.path.isdir(finetuned_dir)) and not (lora_path and os.path.exists(lora_path)):
-        print("❌ No finetuned model directory or LoRA file found. Exiting.")
+        print("No finetuned model directory or LoRA file found. Exiting.")
         diagnose_paths(BASE_DIR)
         return
 
@@ -187,7 +187,7 @@ def main():
         pipe.to(device)
     except RuntimeError as e:
         if device == "mps" and "MPS backend out of memory" in str(e):
-            print("⚠️ MPS OOM when moving pipeline. Falling back to CPU.")
+            print("MPS OOM when moving pipeline. Falling back to CPU.")
             device = "cpu"
             torch_dtype = torch.float32
             pipe.to(device)
@@ -212,7 +212,7 @@ def main():
 
     prompt_slug = slugify(prompt)
     save_path = save_image(image, Path(BASE_DIR) / prompt_slug, prefix="sdxl_ft")
-    print(f"✅ Saved image to: {save_path}")
+    print(f"Saved image to: {save_path}")
 
 if __name__ == "__main__":
     main()

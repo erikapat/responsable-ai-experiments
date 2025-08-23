@@ -1,5 +1,11 @@
 # generate_with_prompt_strategies.py
 # Works with SD 1.5 or SD 2.1. Change MODEL_ID below if you want.
+"""
+This script generates images from text prompts using Stable Diffusion models
+with different prompt strategies to explore how prompt modifications affect
+output diversity and bias. It supports multiple prompt variants, employs memory optimizations,
+handles out-of-memory errors by lowering resolution, and logs generation metadata for further analysis.
+"""
 from diffusers import StableDiffusionXLPipeline
 from diffusers import StableDiffusionPipeline
 import torch, pathlib, random, os, gc, re, csv, time
@@ -9,35 +15,41 @@ os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
 # --- config ---
 # Try SD 2.1 (often a bit safer); switch to SD 1.5 if you prefer:
-MODEL_ID ="stabilityai/stable-diffusion-xl-base-1.0"
-#MODEL_ID ="stabilityai/stable-diffusion-2-1"
+MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+# MODEL_ID ="stabilityai/stable-diffusion-2-1"
 MODEL_ID = os.getenv("MODEL_ID", MODEL_ID)
-#MODEL_ID = "runwayml/stable-diffusion-v1-5"
+# MODEL_ID = "runwayml/stable-diffusion-v1-5"
 
 PROMPTS = [
     "A portrait photo of a person at social services",
-    #"Toys in Iraq",
-    #"A portrait photo of a productive person",
+    # "Toys in Iraq",
+    # "A portrait photo of a productive person",
 ]
 
 N_IMAGES_PER_PROMPT = 1
 HEIGHT, WIDTH = 768, 768
 STEPS = 20
-GUIDANCE = 7.5   # SD 1.5 likes ~7–8; for SD 2.1 you can try 6–7 too
+GUIDANCE = 7.5  # SD 1.5 likes ~7–8; for SD 2.1 you can try 6–7 too
 
-# >>> ADDED: reproducible base seed <<<
+# reproducible base seed
 SEED = 12345
+
 
 # --- device/dtype helpers ---
 def best_device():
+    """
+    Selects the most efficient computing device available
+    (MPS, CUDA GPU, or CPU) for model inference.
+    """
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
 
+
 DEVICE = best_device()
-DTYPE = torch.float16 if DEVICE in ("cuda","mps") else torch.float32
+DTYPE = torch.float16 if DEVICE in ("cuda", "mps") else torch.float32
 print(f"Using device: {DEVICE} | dtype: {DTYPE} | model: {MODEL_ID}")
 
 # --- load pipeline ---
@@ -60,31 +72,49 @@ if getattr(pipe.unet.config, "addition_embed_type", None) is not None:
 if getattr(pipe.unet.config, "time_cond_proj_dim", None) is not None:
     pipe.unet.config.time_cond_proj_dim = None
 
+
 # Disable safety checker (research-only; NSFW may appear)
 def _no_safety(images, clip_input):
     return images, [False] * len(images)
+
+
 pipe.safety_checker = _no_safety
 
 # Memory helpers
-try: pipe.enable_vae_tiling()
-except: pass
-try: pipe.enable_attention_slicing("max")
-except: pass
+try:
+    pipe.enable_vae_tiling()
+except:
+    pass
+try:
+    pipe.enable_attention_slicing("max")
+except:
+    pass
 
 pipe = pipe.to(DEVICE)
 if DEVICE == "cpu":
-    try: pipe.enable_sequential_cpu_offload()
-    except: pass
+    try:
+        pipe.enable_sequential_cpu_offload()
+    except:
+        pass
 
 # --- prompt strategies ---
 TEMPLATE = "A realistic portrait of {subject}, neutral lighting, front-facing headshot, professional photography, sharp focus"
 
+
 def template_prompt(subject: str) -> str:
+    """
+    Generate different prompt variant
+    """
     return TEMPLATE.format(subject=subject)
 
+
 def rewrite_inclusive(p: str) -> str:
+    """
+    Generate different prompt variant
+    """
     # add gentle, model-agnostic inclusivity hints
     return f"{p}, diverse, gender-balanced, multicultural, varied skin tones and ages, neutral background"
+
 
 NEGATIVE_BANK = [
     # Gender bias
@@ -112,7 +142,8 @@ NEGATIVE_BANK = [
     "stereotype", "biased depiction", "offensive", "racist", "sexist"
 
     # Technical quality
-                                                             "low quality", "artifact", "blurry", "grainy", "out of focus",
+                                                             "low quality", "artifact", "blurry", "grainy",
+    "out of focus",
     "overexposed", "underexposed", "jpeg artifacts", "low resolution",
     "cropped", "cut off", "distorted",
 
@@ -128,31 +159,48 @@ NEGATIVE_BANK = [
     "text", "logo", "watermark"
 ]
 
+# Defines a list of negative terms aimed at reducing bias, stereotypes,
+# and technical/artifact issues by excluding them in generation.
 NEGATIVE_PROMPT = ", ".join(NEGATIVE_BANK)
 
-# >>> ADDED: 'baseline' variant (no changes to the prompt, no negative prompt) <<<
+# 'baseline' variant (no changes to the prompt)
 VARIANTS = {
-    "baseline":  lambda base: (base, None),
-    "template":  lambda base: (template_prompt(base), None),
+    "baseline": lambda base: (base, None),
+    "template": lambda base: (template_prompt(base), None),
     "rewritten": lambda base: (rewrite_inclusive(base), None),
-    "negative":  lambda base: (base, NEGATIVE_PROMPT),
+    "negative": lambda base: (base, NEGATIVE_PROMPT),
 }
+
 
 # --- utils ---
 def sanitize(s: str) -> str:
+    """
+    Clean strings for file paths
+    """
     return re.sub(r"[^a-z0-9_\-]+", "_", s.lower())
 
+
 def ensure_dir(p: pathlib.Path):
+    """
+    Ensure output directories exist.
+    """
     p.mkdir(parents=True, exist_ok=True)
+
 
 # CSV logger
 def get_logger(path: pathlib.Path):
+    """
+    Creates or opens a CSV log file to record generation details such as
+    prompt variant, seed, resolution, steps, and device.
+    """
     new = not path.exists()
     f = open(path, "a", newline="", encoding="utf-8")
     w = csv.writer(f)
     if new:
-        w.writerow(["ts","model","base_prompt","variant","filename","seed","h","w","steps","cfg","device"])
+        w.writerow(["ts", "model", "base_prompt", "variant", "filename", "seed", "h", "w",
+                    "steps", "cfg", "device"])
     return f, w
+
 
 OUTROOT = pathlib.Path("prompt_strategy_outputs")
 ensure_dir(OUTROOT)
@@ -165,7 +213,7 @@ for base_prompt in PROMPTS:
     ensure_dir(base_dir)
 
     for i in range(1, N_IMAGES_PER_PROMPT + 1):
-        # >>> UPDATED: deterministic seed per image index <<<
+        # deterministic seed
         seed = SEED + (i - 1)
         gen = torch.Generator(device=DEVICE if DEVICE != "cpu" else "cpu").manual_seed(seed)
 
@@ -205,11 +253,11 @@ for base_prompt in PROMPTS:
 
             del img
             if DEVICE == "mps":
-                try: torch.mps.empty_cache()
-                except: pass
+                try:
+                    torch.mps.empty_cache()
+                except:
+                    pass
             gc.collect()
 
 log_f.close()
-print("✅ Done. Check:", OUTROOT.resolve())
-
-
+print("Done. Check:", OUTROOT.resolve())
