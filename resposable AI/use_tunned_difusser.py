@@ -21,7 +21,7 @@ import time, re
 # Initialize accelerator
 accelerator = Accelerator()
 
-# >>> ADDED: optional in-code multi-prompt list [(text, count), ...]
+# ADDED: optional in-code multi-prompt list [(text, count), ...]
 PROMPTS = [
     ("Toys in Iraq", 2),
     ("A portrait photo of a person at social services", 3),

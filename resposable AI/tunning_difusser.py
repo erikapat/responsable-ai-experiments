@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# tunning_v3_fixed.py
-import os, math, time, json
-os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")  # macOS MPS friendlier
+# tuning_lora_peft_prompt_conditioned.py
+# LoRA prompt-condicionado (SD 1.5 / SDXL) usando PEFT en Py 3.12
+
+import os, math, time, json, random
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
 import torch
 import torch.nn.functional as F
@@ -10,30 +12,42 @@ from PIL import Image
 from tqdm import tqdm
 
 from diffusers import (
-    StableDiffusionPipeline,            # SD 1.5
-    StableDiffusionXLPipeline,         # SDXL
-    DDPMScheduler
+    StableDiffusionPipeline,
+    StableDiffusionXLPipeline,
+    DDPMScheduler,
 )
 
+from peft import LoraConfig, get_peft_model, PeftModel
+
 # -------------------------
-# Config (adjust as needed)
+# Config
 # -------------------------
 class Cfg:
-    train_dir         = "./my_faces/train"   # folder-of-folders: <prompt_folder>/*.jpg|*.png
-    out_dir           = "./sdxl-finetuned"
-    model_id          = os.getenv("MODEL_ID", "runwayml/stable-diffusion-v1-5")  # or "stabilityai/stable-diffusion-xl-base-1.0"
-    image_size        = 256 #512
-    epochs            = 100
-    steps_per_epoch   = 1000     # None = use all samples once; or set an int
-    learning_rate     = 2e-5
-    batch_size        = 4        # keep 1 for low VRAM/CPU
-    vae_scale         = 0.18215  # SD/SDXL latent scaling
+    train_dir         = "./my_faces/train"  # carpeta con subcarpetas por prompt (+ opcional .txt por imagen)
+    out_dir           = "./finetuned"
+    model_id          = os.getenv("MODEL_ID", "runwayml/stable-diffusion-v1-5")  # o "stabilityai/stable-diffusion-xl-base-1.0"
+    image_size        = 512     # SD1.5 → 512. SDXL ideal 1024 si tienes VRAM
+    epochs            = 5
+    steps_per_epoch   = 500
+    learning_rate     = 1e-4    # LoRA tolera LR relativamente alta
+    batch_size       = 4
+    vae_scale         = 0.18215
     log_every         = 25
-    save_every        = 200      # save every N steps
-    save_unet_only   = True      # set False to save the full pipeline (huge)
+    save_every        = 200
+    lora_rank         = 16
+    lora_alpha        = 32      # suele ir bien ≈ 2*r
+    lora_dropout      = 0.0
     seed              = 1234
 
+    # text encoders congelados; entrenamos UNet-LoRA (prompt-condicionado igualmente)
+    prompt_dropout_p  = 0.1
+
 cfg = Cfg()
+
+base = "sdxl" if "xl" in cfg.model_id.lower() else "sd15"
+cfg.out_dir = f"./{base}-finetuned"
+# Forzar nombre de salida
+cfg.out_dir = "./sdxl-finetuned"
 
 # -------------------------
 # Device & dtype
@@ -50,26 +64,34 @@ dtype  = torch.float16 if device == "cuda" else torch.float32
 print(f"Training on {device} | dtype={dtype}")
 
 # -------------------------
-# Dataset: folder-per-prompt
-# root/
-#   A_productive_person/
-#       01.jpg ...
-#   a_person_at_social_services/
-#       a.png ...
+# Dataset
 # -------------------------
 class FolderPromptDataset(Dataset):
     def __init__(self, root, size):
         self.samples = []
         self.size    = size
+        if not os.path.isdir(root):
+            raise RuntimeError(f"train_dir not found: {root}")
         for prompt_folder in sorted(os.listdir(root)):
             pf = os.path.join(root, prompt_folder)
             if not os.path.isdir(pf):
                 continue
-            # convert folder name to prompt text
-            prompt_text = prompt_folder.replace("_", " ").strip()
+            default_prompt = prompt_folder.replace("_", " ").strip()
             for fn in sorted(os.listdir(pf)):
-                if fn.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    self.samples.append((os.path.join(pf, fn), prompt_text))
+                lo = fn.lower()
+                if lo.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    img_path = os.path.join(pf, fn)
+                    cap_path = os.path.splitext(img_path)[0] + ".txt"
+                    prompt_text = default_prompt
+                    if os.path.isfile(cap_path):
+                        try:
+                            with open(cap_path, "r", encoding="utf-8") as f:
+                                cap = f.read().strip()
+                            if cap:
+                                prompt_text = cap
+                        except Exception:
+                            pass
+                    self.samples.append((img_path, prompt_text))
         if not self.samples:
             raise RuntimeError(f"No images found under {root}")
         print(f"Found {len(self.samples)} images across prompts.")
@@ -80,13 +102,13 @@ class FolderPromptDataset(Dataset):
     def __getitem__(self, idx):
         img_path, prompt = self.samples[idx]
         img = Image.open(img_path).convert("RGB").resize((self.size, self.size))
-        # to tensor [-1,1] like diffusers preprocess (C,H,W)
-        px = torch.from_numpy((torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes())).view(img.size[1], img.size[0], 3).numpy().astype("float32") / 255.0))
-        px = px.permute(2, 0, 1) * 2 - 1
+        import numpy as np
+        arr = torch.from_numpy(np.array(img).astype("float32") / 255.0)
+        px = arr.permute(2, 0, 1) * 2 - 1
         return {"pixel_values": px, "prompt": prompt}
 
 def collate_fn(batch):
-    px = torch.stack([b["pixel_values"] for b in batch], dim=0)  # (B,C,H,W)
+    px = torch.stack([b["pixel_values"] for b in batch], dim=0)
     prompts = [b["prompt"] for b in batch]
     return {"pixel_values": px, "prompt": prompts}
 
@@ -94,65 +116,68 @@ dataset = FolderPromptDataset(cfg.train_dir, cfg.image_size)
 loader  = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=False, collate_fn=collate_fn)
 
 # -------------------------
-# Load pipeline (SD 1.5 or SDXL)
-# We disable the safety checker to avoid downloading ~1.2GB on CPU boxes.
+# Pipeline (SD 1.5 o SDXL)
 # -------------------------
 is_sdxl = "xl" in cfg.model_id.lower()
+pipe_cls = StableDiffusionXLPipeline if is_sdxl else StableDiffusionPipeline
 print("Loading pipeline...")
-if is_sdxl:
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        cfg.model_id,
-        torch_dtype=dtype if device == "cuda" else torch.float32,
-        safety_checker=None, requires_safety_checker=False,
-        use_safetensors=True,
-    )
-else:
-    pipe = StableDiffusionPipeline.from_pretrained(
-        cfg.model_id,
-        torch_dtype=dtype if device == "cuda" else torch.float32,
-        safety_checker=None, requires_safety_checker=False,
-        use_safetensors=True,
-    )
+pipe = pipe_cls.from_pretrained(
+    cfg.model_id,
+    torch_dtype=dtype if device == "cuda" else torch.float32,
+    safety_checker=None, requires_safety_checker=False,
+    use_safetensors=True,
+)
 
-# training scheduler (DDPM) — standard for UNet noise prediction objective
 pipe.scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="scaled_linear", prediction_type="epsilon")
 
-# Place modules
-pipe.unet.to(device, dtype=dtype)
-pipe.unet.train()
+pipe.unet.to(device, dtype=dtype).train()
 pipe.unet.enable_gradient_checkpointing()
 
-pipe.vae.to("cpu", dtype=torch.float32)  # keep VAE on CPU to save VRAM
+pipe.vae.to("cpu", dtype=torch.float32)
+for p in pipe.vae.parameters(): p.requires_grad_(False)
+
 if is_sdxl:
     pipe.text_encoder.to("cpu", dtype=torch.float32)
     pipe.text_encoder_2.to("cpu", dtype=torch.float32)
-else:
-    pipe.text_encoder.to("cpu", dtype=torch.float32)
-
-for p in pipe.vae.parameters(): p.requires_grad_(False)
-if is_sdxl:
     for p in pipe.text_encoder.parameters():   p.requires_grad_(False)
     for p in pipe.text_encoder_2.parameters(): p.requires_grad_(False)
 else:
+    pipe.text_encoder.to("cpu", dtype=torch.float32)
     for p in pipe.text_encoder.parameters():   p.requires_grad_(False)
 
-# Memory helpers (safe if unavailable)
-for fn in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
-    try: getattr(pipe, fn)()
-    except Exception: pass
+# -------------------------
+# LoRA (PEFT) en el UNet
+# -------------------------
+# Objetivo: capas lineales de atención: to_q, to_k, to_v, to_out.0
+# Añadimos también proj_in/proj_out para SDXL (beneficia algo la adaptación).
+target_modules = ["to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out"]
 
-optim = torch.optim.AdamW(pipe.unet.parameters(), lr=cfg.learning_rate)
+lora_cfg = LoraConfig(
+    r=cfg.lora_rank,
+    lora_alpha=cfg.lora_alpha,
+    lora_dropout=cfg.lora_dropout,
+    bias="none",
+    target_modules=target_modules,
+    task_type="UNSPECIFIED",   # genérico (no transformers)
+)
 
-# Reproducibility
-g_cpu = torch.Generator("cpu").manual_seed(cfg.seed)
+pipe.unet = get_peft_model(pipe.unet, lora_cfg)
+pipe.unet.print_trainable_parameters()
+
+# Solo los params LoRA tienen requires_grad=True tras get_peft_model
+trainable_params = [p for p in pipe.unet.parameters() if p.requires_grad]
+assert trainable_params, "No LoRA trainable params found via PEFT"
+optim = torch.optim.AdamW(trainable_params, lr=cfg.learning_rate)
 
 # -------------------------
-# Helpers
+# Utils
 # -------------------------
 def compute_sdxl_time_ids(h, w, b, dtype_, dev_):
-    # [orig_h, orig_w, crop_y, crop_x, target_h, target_w]
     t = torch.tensor([h, w, 0, 0, h, w], dtype=dtype_, device=dev_)
     return t.unsqueeze(0).repeat(b, 1)
+
+random.seed(cfg.seed); torch.manual_seed(cfg.seed)
+g_cpu = torch.Generator("cpu").manual_seed(cfg.seed)
 
 os.makedirs(cfg.out_dir, exist_ok=True)
 log_path = os.path.join(cfg.out_dir, "train_log.jsonl")
@@ -160,11 +185,10 @@ log_f = open(log_path, "a", encoding="utf-8")
 
 global_step = 0
 max_steps = cfg.steps_per_epoch if cfg.steps_per_epoch is not None else math.ceil(len(loader)/cfg.batch_size)
-
 print(f"Epochs={cfg.epochs} | steps/epoch≈{max_steps} | saving to {cfg.out_dir}")
 
 # -------------------------
-# Training loop
+# Entrenamiento
 # -------------------------
 for epoch in range(cfg.epochs):
     pbar = tqdm(loader, total=max_steps, desc=f"Epoch {epoch+1}/{cfg.epochs}")
@@ -173,43 +197,38 @@ for epoch in range(cfg.epochs):
         if cfg.steps_per_epoch is not None and step_in_epoch >= cfg.steps_per_epoch:
             break
 
-        # ----- Prepare data -----
-        pixel_values = batch["pixel_values"]        # (B,C,H,W) on CPU
+        pixel_values = batch["pixel_values"]
+        prompts_in   = batch["prompt"]
+        prompts = [(p if random.random() > cfg.prompt_dropout_p else "") for p in prompts_in]
         B, C, H, W = pixel_values.shape
 
         with torch.no_grad():
-            # VAE encode on CPU -> latents
             pv = pixel_values.to("cpu", dtype=torch.float32)
             latents_dist = pipe.vae.encode(pv).latent_dist
-            latents = (latents_dist.sample() * cfg.vae_scale).to(device, dtype=dtype)  # (B,4,h/8,w/8)
+            latents = (latents_dist.sample() * cfg.vae_scale).to(device, dtype=dtype)
 
-            # noise & timesteps
             noise = torch.randn_like(latents, device=device, dtype=dtype)
             t = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (B,), device=device).long()
             noisy_latents = pipe.scheduler.add_noise(latents, noise, t)
 
-            # Prompt embeddings
-            if is_sdxl:
-                # SDXL expects (prompt_embeds, pooled), plus time_ids
-                pe, _, pooled, _ = pipe.encode_prompt(
-                    prompt=batch["prompt"], device="cpu",
-                    num_images_per_prompt=1, do_classifier_free_guidance=False,
-                )
-                prompt_embeds      = pe.to(device, dtype=dtype)
-                pooled_prompt_embs = pooled.to(device, dtype=dtype)
-                add_time_ids       = compute_sdxl_time_ids(H, W, B, prompt_embeds.dtype, device)
-            else:
-                # SD 1.5 (CLIP text): tokenize -> text_encoder
-                tok = pipe.tokenizer(
-                    batch["prompt"], padding=True, truncation=True, return_tensors="pt"
-                )
-                input_ids = tok.input_ids.to("cpu")
-                attn_mask = tok.attention_mask.to("cpu") if hasattr(tok, "attention_mask") else None
+        if is_sdxl:
+            pe, _, pooled, _ = pipe.encode_prompt(
+                prompt=prompts, device="cpu",
+                num_images_per_prompt=1, do_classifier_free_guidance=False,
+            )
+            prompt_embeds      = pe.to(device, dtype=dtype)
+            pooled_prompt_embs = pooled.to(device, dtype=dtype)
+            add_time_ids       = compute_sdxl_time_ids(H, W, B, prompt_embeds.dtype, device)
+        else:
+            tok = pipe.tokenizer(prompts, padding=True, truncation=True, return_tensors="pt")
+            input_ids = tok.input_ids.to("cpu")
+            attn_mask = tok.attention_mask.to("cpu") if hasattr(tok, "attention_mask") else None
+            with torch.no_grad():
                 te_out = pipe.text_encoder(input_ids=input_ids, attention_mask=attn_mask)
-                prompt_embeds = te_out[0].to(device, dtype=dtype)  # (B,77,768)
+            prompt_embeds = te_out[0].to(device, dtype=dtype)
 
-        # ----- Forward UNet -----
         optim.zero_grad(set_to_none=True)
+
         if is_sdxl:
             noise_pred = pipe.unet(
                 noisy_latents,
@@ -226,9 +245,7 @@ for epoch in range(cfg.epochs):
 
         loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
         loss.backward()
-
-        # light grad clip to be safe on CPU
-        torch.nn.utils.clip_grad_norm_(pipe.unet.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
         optim.step()
 
         global_step += 1
@@ -248,20 +265,15 @@ for epoch in range(cfg.epochs):
         if global_step % cfg.save_every == 0:
             ckpt_dir = os.path.join(cfg.out_dir, f"step_{global_step:06d}")
             os.makedirs(ckpt_dir, exist_ok=True)
-            if cfg.save_unet_only:
-                pipe.unet.save_pretrained(os.path.join(ckpt_dir, "unet"))
-            else:
-                pipe.save_pretrained(ckpt_dir)
-            print(f"Saved checkpoint to {ckpt_dir}")
+            # Guarda SOLO los adapters LoRA (PEFT)
+            pipe.unet.save_pretrained(os.path.join(ckpt_dir, "lora_unet_peft"))
+            print(f"Saved LoRA adapters (PEFT) to {ckpt_dir}")
 
 # -------------------------
-# Final save
+# Guardado final (adapters PEFT)
 # -------------------------
 final_dir = os.path.join(cfg.out_dir, "final")
 os.makedirs(final_dir, exist_ok=True)
-if cfg.save_unet_only:
-    pipe.unet.save_pretrained(os.path.join(final_dir, "unet"))
-else:
-    pipe.save_pretrained(final_dir)
+pipe.unet.save_pretrained(os.path.join(final_dir, "lora_unet_peft"))
 log_f.close()
-print(f"Done. Weights saved to {final_dir}\nLogs → {log_path}")
+print(f"Done. LoRA adapters (PEFT) saved to {final_dir}\nLogs → {log_path}")

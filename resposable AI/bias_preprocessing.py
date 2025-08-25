@@ -7,6 +7,12 @@
 # - Metrics CSV/JSON, candidate saving, pHash dedup, FPS diversity
 # - Robust error handling (no UnboundLocalError / NameError)
 # ------------------------------------------------------------
+# gen_postprocess_enhanced_logging_safe.py
+# ------------------------------------------------------------
+# Text-to-image pipeline con postpro avanzado + LOGS ricos.
+# Endurecido para entornos sin torch>=2.6: preferimos safetensors y
+# si CLIP/captioner no pueden cargarse, seguimos con fallbacks seguros.
+# ------------------------------------------------------------
 
 import argparse
 import csv
@@ -21,17 +27,21 @@ import sys
 import pathlib
 from typing import List, Dict, Any, Tuple, Optional
 
+# Preferir safetensors al cargar modelos
+os.environ.setdefault("TRANSFORMERS_PREFER_SAFETENSORS", "1")
+os.environ.setdefault("SAFETENSORS_FAST", "1")
+
 import numpy as np
 from PIL import Image
 
-# Optional: OpenCV for IQA (sharpness)
+# Optional: OpenCV para IQA (sharpness)
 try:
     import cv2
     _HAS_CV2 = True
 except Exception:
     _HAS_CV2 = False
 
-# Optional: perceptual hash for dedup
+# Optional: perceptual hash para deduplicación
 try:
     import imagehash
     _HAS_PHASH = True
@@ -88,7 +98,6 @@ def setup_logger(outdir: pathlib.Path, level: str = "INFO") -> logging.Logger:
 def dummy_safety(images, clip_input):
     return images, [False] * len(images)
 
-
 def _maybe_enable_speed_tricks(pipe, logger: logging.Logger, allow_compile: bool, *, progress_bar: bool):
     try:
         pipe.set_progress_bar_config(disable=not progress_bar)
@@ -112,7 +121,6 @@ def _maybe_enable_speed_tricks(pipe, logger: logging.Logger, allow_compile: bool
                 logger.info("[Speed] torch.compile aplicado a UNet")
             except Exception as e:
                 logger.info(f"[Speed] torch.compile no aplicado: {e}")
-
 
 def make_pipeline(model_id: str, use_dpm: bool, allow_compile: bool, logger: logging.Logger, *, progress_bar: bool):
     if "stable-diffusion-xl" in model_id:
@@ -139,33 +147,50 @@ def make_pipeline(model_id: str, use_dpm: bool, allow_compile: bool, logger: log
     return pipe
 
 # -------------------------------
-# CLIP (alignment + embeddings)
+# CLIP (alignment + embeddings) con fallback seguro
 # -------------------------------
 
 _CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
 _clip_model: Optional[CLIPModel] = None
 _clip_proc: Optional[CLIPProcessor] = None
+_CLIP_AVAILABLE: bool = True  # pasa a False si no podemos cargar CLIP
 
-
-def load_clip():
-    global _clip_model, _clip_proc
-    if _clip_model is None:
-        _clip_model = CLIPModel.from_pretrained(_CLIP_MODEL_ID).to(DEVICE)
-        _clip_proc = CLIPProcessor.from_pretrained(_CLIP_MODEL_ID)
+def load_clip(logger: Optional[logging.Logger] = None):
+    """Intenta cargar CLIP con safetensors; si falla, desactiva CLIP (fallback)."""
+    global _clip_model, _clip_proc, _CLIP_AVAILABLE
+    if _clip_model is not None or not _CLIP_AVAILABLE:
+        return
+    tried = []
+    for mid in [_CLIP_MODEL_ID, "openai/clip-vit-base-patch16"]:
+        try:
+            _clip_model = CLIPModel.from_pretrained(mid, use_safetensors=True).to(DEVICE)
+            _clip_proc = CLIPProcessor.from_pretrained(mid)
+            if logger: logger.info(f"[CLIP] cargado: {mid} (safetensors preferido)")
+            return
+        except Exception as e:
+            tried.append(f"{mid}: {e}")
+            _clip_model = None
+            _clip_proc = None
+    _CLIP_AVAILABLE = False
+    if logger:
+        logger.warning("[CLIP] deshabilitado (no se pudo cargar con safetensors). Detalles: " + " | ".join(map(str, tried)))
 
 @torch.no_grad()
-
-def clip_text_features(prompt: str) -> torch.Tensor:
-    load_clip()
+def clip_text_features(prompt: str, logger: Optional[logging.Logger] = None) -> Optional[torch.Tensor]:
+    load_clip(logger)
+    if not _CLIP_AVAILABLE:
+        return None
     inputs = _clip_proc(text=[prompt], return_tensors="pt", padding=True).to(DEVICE)
     outputs = _clip_model.get_text_features(**inputs)
     feats = outputs / outputs.norm(dim=-1, keepdim=True)
     return feats.squeeze(0)
 
 @torch.no_grad()
-
-def clip_image_embeddings_batch(images: List[Image.Image], batch_size: int = 16) -> np.ndarray:
-    load_clip()
+def clip_image_embeddings_batch(images: List[Image.Image], batch_size: int = 16,
+                                logger: Optional[logging.Logger] = None) -> Optional[np.ndarray]:
+    load_clip(logger)
+    if not _CLIP_AVAILABLE:
+        return None
     embs: List[np.ndarray] = []
     for i in range(0, len(images), batch_size):
         batch = images[i:i+batch_size]
@@ -178,10 +203,26 @@ def clip_image_embeddings_batch(images: List[Image.Image], batch_size: int = 16)
     return np.vstack(embs)
 
 # -------------------------------
-# Aesthetic score (proxy from CLIP emb)
+# Embedding barato de fallback para diversidad
+# -------------------------------
+
+def simple_hist_emb(img: Image.Image, bins: int = 16) -> np.ndarray:
+    """Embedding barato (histograma RGB) para diversidad cuando CLIP no está disponible."""
+    arr = np.array(img.convert("RGB"))
+    h = []
+    for c in range(3):
+        hist, _ = np.histogram(arr[:, :, c], bins=bins, range=(0, 255), density=True)
+        h.append(hist.astype(np.float32))
+    v = np.concatenate(h).astype(np.float32)
+    v /= (np.linalg.norm(v) + 1e-8)
+    return v
+
+# -------------------------------
+# Aesthetic score (proxy desde embeddings)
 # -------------------------------
 
 def aesthetic_from_emb(emb_row: np.ndarray) -> float:
+    # proxy muy liviano: dispersión del embedding
     return float(np.std(emb_row))
 
 # -------------------------------
@@ -202,7 +243,7 @@ def iqa_sharpness_batch(images: List[Image.Image]) -> List[float]:
     return vals
 
 # -------------------------------
-# Safety & bias filters (batched)
+# Safety & bias filters (batched) con carga perezosa y fallback
 # -------------------------------
 
 _nsfw = None
@@ -213,22 +254,51 @@ BANNED_KEYWORDS = {
     "violence", "beheading", "genital", "nsfw"
 }
 
+def _make_nsfw_stub():
+    # Devuelve lista tipo pipeline, siempre score nsfw=0.0
+    def _stub(batch):
+        return [[{"label":"nsfw","score":0.0} ] for _ in batch]
+    return _stub
 
-def load_safety():
+def _make_captioner_stub():
+    def _stub(batch, max_new_tokens=30):
+        return [[{"generated_text": ""}] for _ in batch]
+    return _stub
+
+def load_safety(caption_needed: bool, logger: logging.Logger):
     global _nsfw, _captioner
+    # NSFW classifier
     if _nsfw is None:
-        _nsfw = hf_pipeline("image-classification", model="AdamCodd/vit-base-nsfw-detector", device=0 if DEVICE=="cuda" else -1)
-    if _captioner is None:
-        _captioner = hf_pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=0 if DEVICE=="cuda" else -1)
-
+        try:
+            _nsfw = hf_pipeline(
+                "image-classification",
+                model="AdamCodd/vit-base-nsfw-detector",
+                device=0 if DEVICE=="cuda" else -1,
+            )
+            if logger: logger.info("[SAFETY] NSFW detector cargado")
+        except Exception as e:
+            logger.warning(f"[SAFETY] NSFW no disponible ({e}) -> usando stub seguro (nsfw=0.0)")
+            _nsfw = _make_nsfw_stub()
+    # Captioner (solo si es necesario)
+    if caption_needed and _captioner is None:
+        try:
+            _captioner = hf_pipeline(
+                "image-to-text",
+                model="Salesforce/blip-image-captioning-base",
+                device=0 if DEVICE=="cuda" else -1,
+            )
+            if logger: logger.info("[SAFETY] Captioner cargado (BLIP)")
+        except Exception as e:
+            logger.warning(f"[SAFETY] Captioner no disponible ({e}) -> usando stub (caption vacío)")
+            _captioner = _make_captioner_stub()
 
 def nsfw_scores_batch(images: List[Image.Image], batch_size: int, logger: logging.Logger) -> List[Optional[float]]:
-    load_safety()
     scores: List[Optional[float]] = []
     for i in range(0, len(images), batch_size):
         batch = images[i:i+batch_size]
         try:
             out = _nsfw(batch)
+            # normalizar forma (lista de listas)
             if out and isinstance(out[0], dict):
                 out = [out]
             for res in out:
@@ -243,9 +313,7 @@ def nsfw_scores_batch(images: List[Image.Image], batch_size: int, logger: loggin
             scores.extend([None] * len(batch))
     return scores
 
-
 def captions_batch(images: List[Image.Image], batch_size: int, max_new_tokens: int, logger: logging.Logger) -> List[str]:
-    load_safety()
     caps: List[str] = []
     for i in range(0, len(images), batch_size):
         batch = images[i:i+batch_size]
@@ -261,14 +329,18 @@ def captions_batch(images: List[Image.Image], batch_size: int, max_new_tokens: i
             caps.extend([""] * len(batch))
     return caps
 
-
 def safety_gate(images: List[Image.Image], *, nsfw_threshold: float, nsfw_margin: float,
                 caption_mode: str, safety_batch_size: int, caption_batch_size: int,
                 caption_max_tokens: int, logger: logging.Logger,
                 log_captions: bool) -> Tuple[List[bool], List[Dict[str, Any]]]:
+
+    caption_needed = caption_mode in ("auto", "unsafe", "all")
+    load_safety(caption_needed=caption_needed, logger=logger)
+
     metrics: List[Dict[str, Any]] = []
     nsfw_scores = nsfw_scores_batch(images, safety_batch_size, logger)
 
+    # Decide a quién hacer caption
     need_caption_idx: List[int] = []
     if caption_mode in ("auto", "unsafe", "all"):
         for i, s in enumerate(nsfw_scores):
@@ -277,7 +349,7 @@ def safety_gate(images: List[Image.Image], *, nsfw_threshold: float, nsfw_margin
             elif caption_mode == "unsafe":
                 if s is not None and s > (nsfw_threshold - nsfw_margin):
                     need_caption_idx.append(i)
-            else:  # auto
+            else:  # auto: borderline
                 if s is not None and (nsfw_threshold - nsfw_margin) < s <= nsfw_threshold:
                     need_caption_idx.append(i)
 
@@ -291,11 +363,13 @@ def safety_gate(images: List[Image.Image], *, nsfw_threshold: float, nsfw_margin
     accepts: List[bool] = []
     for i, s in enumerate(nsfw_scores):
         info = {"nsfw_score": s, "caption": None, "keyword_hit": None, "reason": None}
+        # corte duro por NSFW
         if s is not None and s > nsfw_threshold:
             info["reason"] = f"nsfw_score>{nsfw_threshold:.2f}"
             accepts.append(False)
             metrics.append(info)
             continue
+        # caption keywords si corresponde
         cap = captions_map.get(i)
         if cap is not None:
             cap_l = cap.lower()
@@ -313,14 +387,13 @@ def safety_gate(images: List[Image.Image], *, nsfw_threshold: float, nsfw_margin
     return accepts, metrics
 
 # -------------------------------
-# Dedup + Diversity
+# Dedup + Diversidad
 # -------------------------------
 
 def phash_value(img: Image.Image) -> Optional[str]:
     if not _HAS_PHASH:
         return None
     return str(imagehash.phash(img))
-
 
 def diversify_by_fps(cands: List[Dict[str, Any]], k: int, logger: logging.Logger) -> List[Dict[str, Any]]:
     if not cands:
@@ -343,7 +416,7 @@ def diversify_by_fps(cands: List[Dict[str, Any]], k: int, logger: logging.Logger
     return selected
 
 # -------------------------------
-# Scoring & selection
+# Scoring & selección
 # -------------------------------
 
 def zscale(values: List[float]) -> List[float]:
@@ -352,7 +425,6 @@ def zscale(values: List[float]) -> List[float]:
         return arr.tolist()
     mu, sd = float(arr.mean()), float(arr.std() + 1e-6)
     return ((arr - mu) / sd).tolist()
-
 
 def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_thresh: int, *,
                      logger: logging.Logger,
@@ -380,23 +452,30 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
 
     safe_imgs = [images[i] for i in safe_idx]
 
-    # 2) CLIP emb batch + alignment
-    text_f = clip_text_features(prompt)
-    img_embs = clip_image_embeddings_batch(safe_imgs, batch_size=clip_batch_size)
-    text_np = text_f.detach().cpu().numpy()
-    clip_scores = [float(np.dot(text_np, e)) for e in img_embs]
+    # 2) CLIP emb batch + alignment (con fallback)
+    text_f = clip_text_features(prompt, logger)
+    img_embs = clip_image_embeddings_batch(safe_imgs, batch_size=clip_batch_size, logger=logger)
+
+    if (text_f is None) or (img_embs is None):
+        logger.warning("[CLIP] no disponible -> usando fallback sin CLIP.")
+        # sin CLIP: score de alineación = 0; emb = histograma para diversidad
+        clip_scores = [0.0] * len(safe_imgs)
+        img_embs = np.vstack([simple_hist_emb(im) for im in safe_imgs]) if safe_imgs else np.zeros((0, 48), dtype=np.float32)
+    else:
+        text_np = text_f.detach().cpu().numpy()
+        clip_scores = [float(np.dot(text_np, e)) for e in img_embs]
 
     # 3) Aesthetic proxy + IQA
     aes_scores = [aesthetic_from_emb(e) for e in img_embs]
     iqa_scores = iqa_sharpness_batch(safe_imgs)
 
-    # 4) z-score & combine
+    # 4) z-score & combinación (ponderaciones sencillas)
     clip_z = zscale(clip_scores)
     aes_z = zscale(aes_scores)
     iqa_z = zscale(iqa_scores)
     combined = [0.5*clip_z[i] + 0.4*aes_z[i] + 0.1*iqa_z[i] for i in range(len(safe_imgs))]
 
-    # 5) Bundle
+    # 5) Empaquetado
     bundled: List[Dict[str, Any]] = []
     for j, si in enumerate(safe_idx):
         bundle = {
@@ -411,9 +490,10 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
             "iqa_z": float(iqa_z[j]),
             "emb": img_embs[j],
             "phash": phash_value(safe_imgs[j]),
-            **saf_metrics[si],
+            **saf_metrics[si],  # métricas de safety del índice original
         }
         bundled.append(bundle)
+        # refleja métricas unificadas
         for m in metrics:
             if m["cand_id"] == si:
                 m.update({
@@ -428,7 +508,7 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
                 })
                 break
 
-    # 6) pHash dedup
+    # 6) Dedup por pHash
     if _HAS_PHASH:
         uniq: List[Dict[str, Any]] = []
         for c in bundled:
@@ -437,8 +517,7 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
                 if c["phash"] and u["phash"]:
                     d = imagehash.hex_to_hash(c["phash"]) - imagehash.hex_to_hash(u["phash"])
                     if d <= phash_thresh:
-                        dup_of = (u["cand_id"], d)
-                        break
+                        dup_of = (u["cand_id"], d); break
             if dup_of is None:
                 uniq.append(c)
             else:
@@ -451,10 +530,11 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
         uniq = bundled
         logger.info("  [INFO] pHash no disponible -> dedup omitido.")
 
-    # 7) Sort & diversify
+    # 7) Orden + diversidad
     uniq.sort(key=lambda x: x["score"], reverse=True)
     winners = diversify_by_fps(uniq, top_k, logger)
 
+    # marca ganadores
     win_ids = {w["cand_id"] for w in winners}
     for m in metrics:
         m["selected"] = m.get("cand_id") in win_ids
@@ -463,7 +543,7 @@ def score_and_select(prompt: str, images: List[Image.Image], top_k: int, phash_t
     return winners, metrics
 
 # -------------------------------
-# Generation (batched)
+# Generación (batched)
 # -------------------------------
 
 def sanitize_dir_name(s: str) -> str:
@@ -471,7 +551,6 @@ def sanitize_dir_name(s: str) -> str:
     s = re.sub(r"[^a-z0-9_\-]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("_")
     return s or "prompt"
-
 
 def save_metrics_csv(metrics_path: pathlib.Path, prompt: str, cols: List[str], rows: List[Dict[str, Any]]):
     with open(metrics_path, "w", newline="", encoding="utf-8") as f:
@@ -481,12 +560,10 @@ def save_metrics_csv(metrics_path: pathlib.Path, prompt: str, cols: List[str], r
             r2 = {**r, "prompt": prompt}
             w.writerow(r2)
 
-
 def save_metrics_json(metrics_path: pathlib.Path, prompt: str, rows: List[Dict[str, Any]]):
     payload = {"prompt": prompt, "metrics": rows}
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-
 
 def batched_generate(
         pipe,
@@ -501,6 +578,7 @@ def batched_generate(
         log_batch_progress: bool = False,
         step_progress_every: int = 0,
 ) -> Tuple[List[Image.Image], List[int]]:
+
     images: List[Image.Image] = []
     seeds: List[int] = []
 
@@ -562,7 +640,6 @@ def batched_generate(
 
     return images, seeds
 
-
 def generate_for_prompt(
         pipe,
         prompt: str,
@@ -599,13 +676,14 @@ def generate_for_prompt(
     if save_candidates:
         cand_dir.mkdir(exist_ok=True)
 
-    # Generate once (batched)
+    # 1) Generación
     candidates: List[Image.Image] = []
     seeds: List[int] = []
     try:
         candidates, seeds = batched_generate(
             pipe, prompt, n_candidates, steps, guidance, height, width,
             gen_batch_size, logger, log_batch_progress=log_batch_progress,
+            step_progress_every=step_progress_every,
         )
     except Exception as e:
         logger.exception("  [ERROR] batched_generate failed; continuing with 0 candidates: %s", e)
@@ -624,7 +702,7 @@ def generate_for_prompt(
             except Exception as e:
                 logger.warning(f"  [SAVE WARN] cand {i}: {e}")
 
-    # Scoring + selection
+    # 2) Scoring + selección
     winners, per_metrics = score_and_select(
         prompt, candidates, top_k=top_k, phash_thresh=phash_thresh, logger=logger,
         nsfw_threshold=nsfw_threshold, nsfw_margin=nsfw_margin,
@@ -633,7 +711,7 @@ def generate_for_prompt(
         log_captions=log_captions, clip_batch_size=clip_batch_size,
     )
 
-    # Attach seeds
+    # 3) Seeds en métricas
     for m in per_metrics:
         cid = m.get("cand_id")
         if cid is not None and cid < len(seeds):
@@ -641,7 +719,7 @@ def generate_for_prompt(
 
     logger.info(f"  Selected winners: {len(winners)}")
 
-    # Save winners
+    # 4) Guardar ganadores
     for idx, w in enumerate(winners, start=1):
         fp = prompt_dir / f"{idx:02d}.png"
         try:
@@ -650,7 +728,7 @@ def generate_for_prompt(
         except Exception as e:
             logger.error(f"  [SAVE ERROR] {e}")
 
-    # Save metrics
+    # 5) Guardar métricas
     if save_metrics:
         ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         if metrics_fmt.lower() == "csv":
@@ -667,7 +745,7 @@ def generate_for_prompt(
             save_metrics_json(metrics_path, prompt, per_metrics)
             logger.info(f"  [METRICS] JSON saved: {metrics_path.name}")
 
-    # Cleanup
+    # Limpieza
     del candidates, winners
     gc.collect()
     if DEVICE == "cuda":
@@ -707,8 +785,8 @@ def main():
     # Safety/caption
     ap.add_argument("--nsfw-threshold", type=float, default=0.7)
     ap.add_argument("--nsfw-margin", type=float, default=0.05, help="Zona borderline para activar caption en modo AUTO")
-    ap.add_argument("--caption-mode", type=str, default="auto", choices=["auto","winners","unsafe","all","none"],
-                    help="AUTO: caption solo borderline; WINNERS: caption a ganadores (no bloquea); UNSAFE: caption a NSFW borderline; ALL/NONE")
+    ap.add_argument("--caption-mode", type=str, default="auto", choices=["auto","unsafe","all","none"],
+                    help="AUTO: caption solo borderline; UNSAFE: caption a borderline; ALL: caption a todos; NONE: no caption")
     ap.add_argument("--caption-max-tokens", type=int, default=30)
 
     # Logging/metrics
@@ -724,7 +802,8 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     logger = setup_logger(outdir, args.log_level)
 
-    pipe = make_pipeline(args.model_id, use_dpm=args.use_dpm, allow_compile=args.compile_unet, logger=logger, progress_bar=args.progress_bar)
+    pipe = make_pipeline(args.model_id, use_dpm=args.use_dpm, allow_compile=args.compile_unet,
+                         logger=logger, progress_bar=args.progress_bar)
 
     for prompt in args.prompts:
         generate_for_prompt(
