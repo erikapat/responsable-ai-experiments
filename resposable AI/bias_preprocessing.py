@@ -1,69 +1,6 @@
-# gen_postprocess_enhanced_logging.py (FAST)
-# ------------------------------------------------------------
-# Same features as before (quality+seguridad+selección+logging),
-# pero con optimizaciones fuertes de rendimiento:
-# - Generación por lotes (num_images_per_prompt) con seeds reproducibles
-# - CLIP en batch: text feature 1x por prompt + image features 1x por imagen
-# - Reutiliza embeddings para CLIP alignment y estética (sin recomputar)
-# - Safety en batch: NSFW para todas; Caption sólo si es necesario (modo AUTO)
-# - Opciones de scheduler rápido (DPMSolver) y xFormers si está disponible
-# - Batches configurables para generación/CLIP/NSFW/Caption
-#
-# USO sugerido (rápido y con buen equilibrio):
-#   python gen_postprocess_enhanced_logging.py \
-#     --prompts "Toys in Iraq" "A portrait photo of a productive person" \
-#     --n-candidates 40 --top-k 6 --steps 18 --guidance 6.5 \
-#     --gen-batch-size 8 --clip-batch-size 16 --safety-batch-size 16 \
-#     --caption-mode auto --log-level INFO --save-metrics --metrics-fmt csv
-#
-# ------------------------------------------------------------
 
-# gen_postprocess_enhanced_logging.py (FAST)
-# ------------------------------------------------------------
-# Same features as before (quality+seguridad+selección+logging),
-# pero con optimizaciones fuertes de rendimiento:
-# - Generación por lotes (num_images_per_prompt) con seeds reproducibles
-# - CLIP en batch: text feature 1x por prompt + image features 1x por imagen
-# - Reutiliza embeddings para CLIP alignment y estética (sin recomputar)
-# - Safety en batch: NSFW para todas; Caption sólo si es necesario (modo AUTO)
-# - Opciones de scheduler rápido (DPMSolver) y xFormers si está disponible
-# - Batches configurables para generación/CLIP/NSFW/Caption
-#
-# USO sugerido (rápido y con buen equilibrio):
-#   python gen_postprocess_enhanced_logging.py \
-#     --prompts "Toys in Iraq" "A portrait photo of a productive person" \
-#     --n-candidates 40 --top-k 6 --steps 18 --guidance 6.5 \
-#     --gen-batch-size 8 --clip-batch-size 16 --safety-batch-size 16 \
-#     --caption-mode auto --log-level INFO --save-metrics --metrics-fmt csv
-#
-# ------------------------------------------------------------
-
-# gen_postprocess_enhanced_logging.py (FAST, FIXED)
 # ------------------------------------------------------------
 # Text-to-image generation with upgraded postprocessing + RICH LOGGING
-# Optimized & bugfixed version:
-# - Batched generation, CLIP features, and safety checks
-# - DPMSolver option, xFormers, optional torch.compile
-# - Logging controls: progress bar, batch progress, DEBUG details
-# - Metrics CSV/JSON, candidate saving, pHash dedup, FPS diversity
-# - Robust error handling (no UnboundLocalError / NameError)
-# ------------------------------------------------------------
-
-# gen_postprocess_enhanced_logging.py (FAST, FIXED)
-# ------------------------------------------------------------
-# Text-to-image generation with upgraded postprocessing + RICH LOGGING
-# Optimized & bugfixed version:
-# - Batched generation, CLIP features, and safety checks
-# - DPMSolver option, xFormers, optional torch.compile
-# - Logging controls: progress bar, batch progress, DEBUG details
-# - Metrics CSV/JSON, candidate saving, pHash dedup, FPS diversity
-# - Robust error handling (no UnboundLocalError / NameError)
-# ------------------------------------------------------------
-
-# gen_postprocess_enhanced_logging.py (FAST, FIXED)
-# ------------------------------------------------------------
-# Text-to-image generation with upgraded postprocessing + RICH LOGGING
-# Optimized & bugfixed version:
 # - Batched generation, CLIP features, and safety checks
 # - DPMSolver option, xFormers, optional torch.compile
 # - Logging controls: progress bar, batch progress, DEBUG details
@@ -826,17 +763,6 @@ if __name__ == "__main__":
 
 
 """
-python bias_preprocessing_v2_comments.py  
---prompts "Toys in Iraq" \
-  --n-candidates 2 --steps 18 --guidance 6.5 \
-  --use-dpm --gen-batch-size 8 \
-  --log-level INFO \
-  --log-batch-progress \                # ← log por LOTE generado
-  --step-progress-every 2 \             # ← log cada 2 pasos de difusión
-  --progress-bar  
-
-
-
 
 python -u bias_preprocessing.py \
   --model-id stabilityai/stable-diffusion-xl-base-1.0 \
@@ -853,7 +779,7 @@ python -u bias_preprocessing.py \
   --save-metrics --metrics-fmt csv
 
 
-  python -u bias_preprocessing_v2_comments.py \
+python -u bias_preprocessing.py \
   --model-id stabilityai/stable-diffusion-xl-base-1.0 \
   --prompts "A portrait photo of a person at social services" \
   --n-candidates 20 --top-k 8 \
@@ -867,7 +793,7 @@ python -u bias_preprocessing.py \
   --save-metrics --metrics-fmt csv
   
 
-python -u bias_preprocessing_v2_comments.py \
+python -u bias_preprocessing.py \
   --model-id stabilityai/stable-diffusion-xl-base-1.0 \
   --prompts "A portrait photo of a productive persom" \
   --n-candidates 5 --top-k 3 \
