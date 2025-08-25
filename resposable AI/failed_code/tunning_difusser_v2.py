@@ -14,9 +14,9 @@ from tqdm import tqdm
 # -------------------------
 train_dir = "./my_faces/train"
 resolution = 512
-batch_size = 1
-epochs = 1
-lr = 1e-5
+batch_size = 2
+epochs = 500
+lr = 2e-5
 vae_scale = 0.18215
 
 use_mps = torch.backends.mps.is_available()

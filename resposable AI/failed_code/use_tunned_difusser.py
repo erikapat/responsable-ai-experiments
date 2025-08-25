@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-'''
-RUN WITH:
-python use_tunned_difusser_v2.py  --prompt "Toys in Iraq" --count 4 --steps 50 --width 768 --height 768 --scale 3.5 --seed 124
-python use_tunned_difusser_v2.py  --prompt "a person in social services" --count 8 --steps 50 --width 1024 --height 1024 --scale 6.5 --seed 125
-'''
-
 import os
-from accelerate import Accelerator
 # Prevent early MPS OOM (must be set before torch import)
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
@@ -16,26 +9,27 @@ import torch
 from diffusers import StableDiffusionXLPipeline
 from pathlib import Path
 from PIL import Image
-import time, re
+import time, os, re
 
-# Initialize accelerator
-accelerator = Accelerator()
+prompt = "A portrait photo of a person at social services"
+    #"Toys in Iraq",
+    #"A portrait photo of a productive person",
 
-# >>> ADDED: optional in-code multi-prompt list [(text, count), ...]
-PROMPTS = [
-    ("Toys in Iraq", 2),
-    ("A portrait photo of a person at social services", 3),
-    ("A productive person", 1),
-]
+
 
 def slugify(s: str) -> str:
     return re.sub(r"[^a-z0-9_\-]+", "_", s.lower())
 
 def save_image(img, base_dir: Path, prefix="fine_tuned_result", ext="png") -> Path:
+    """
+    Guarda una imagen PIL.Image en base_dir/results/ con un nombre único.
+    También acepta bytes. Si recibe str/Path por error, lanza TypeError claro.
+    """
     out_dir = Path(base_dir) / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{prefix}_{int(time.time())}.{ext}"
 
+    # Protección de tipos
     if isinstance(img, Image.Image):
         img.save(path)
     elif isinstance(img, (bytes, bytearray)):
@@ -47,22 +41,22 @@ def save_image(img, base_dir: Path, prefix="fine_tuned_result", ext="png") -> Pa
         )
     else:
         raise TypeError(f"Tipo no soportado para img: {type(img)}")
+
     return path
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="SDXL inference with optional finetuned dir or LoRA (MPS-safe).")
-    p.add_argument("--prompt", default="A portrait photo of a person at social services")
+    p.add_argument("--prompt", default=prompt)
     p.add_argument("--steps", type=int, default=50)
     p.add_argument("--scale", type=float, default=6.5)
     p.add_argument("--seed", type=int, default=38)
-    p.add_argument("--height", type=int, default=1024)
+    p.add_argument("--height", type=int, default=1024, help="Reduce to avoid MPS OOM (e.g., 512 or 384)")
     p.add_argument("--width", type=int, default=1024)
-    p.add_argument("--finetuned_dir", default=None)
-    p.add_argument("--lora", default=None)
+    p.add_argument("--finetuned_dir", default=None, help="Path to a saved finetuned pipeline dir")
+    p.add_argument("--lora", default=None, help="Path to LoRA file or directory")
     p.add_argument("--base_model", default="stabilityai/stable-diffusion-xl-base-1.0")
-    p.add_argument("--device", default=None, choices=["cpu","mps","cuda"])
-    p.add_argument("--use_prompts", action="store_true")
-    p.add_argument("--count", type=int, default=1)
+    p.add_argument("--device", default=None, choices=["cpu","mps","cuda"], help="Force device; default picks best")
     return p.parse_args()
 
 def resolve_relative(base_dir, path_or_none):
@@ -88,12 +82,20 @@ def diagnose_paths(base_dir):
     print("\n--- Path diagnostics ---")
     print(f"Script base_dir: {base_dir}")
     print(f"CWD: {os.getcwd()}")
+    print("base_dir contents:")
     try:
         for item in os.listdir(base_dir):
             print("  -", item)
     except Exception as e:
         print("  (failed to list base_dir)", e)
     print("------------------------\n")
+
+def save_image(img, base_dir, prefix="fine_tuned_result"):
+    out_dir = os.path.join(base_dir, "results")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{prefix}_{int(time.time())}.png")
+    img.save(path)
+    return path
 
 def pick_device(forced=None):
     if forced:
@@ -112,16 +114,17 @@ def main():
     except NameError:
         BASE_DIR = os.getcwd()
 
+    # Device & dtype (fp32 for MPS/CPU; fp16 for CUDA)
     device = pick_device(args.device)
     torch_dtype = torch.float16 if device == "cuda" else torch.float32
     print(f"Requested device={device}, dtype={torch_dtype}")
-
+    # Resolve paths relative to script folder
     finetuned_dir = resolve_relative(BASE_DIR, args.finetuned_dir)
     lora_path = resolve_relative(BASE_DIR, args.lora)
-    BASE_DIR = '/home/sagemaker-user/responsable-ai-experiments'
+
+    # Auto-discover defaults next to script if not provided
     if not finetuned_dir:
         maybe_ft = os.path.join(BASE_DIR, "sdxl-finetuned")
-        print('Loading sdxl-finetuned')
         if os.path.isdir(maybe_ft):
             finetuned_dir = maybe_ft
     if not lora_path:
@@ -129,27 +132,28 @@ def main():
         if os.path.exists(maybe_lora):
             lora_path = maybe_lora
 
+    # --- Require tuned model (finetuned or LoRA) ---
     if not (finetuned_dir and os.path.isdir(finetuned_dir)) and not (lora_path and os.path.exists(lora_path)):
         print("No finetuned model directory or LoRA file found. Exiting.")
         diagnose_paths(BASE_DIR)
         return
 
+    # Load pipeline
     if finetuned_dir and os.path.isdir(finetuned_dir):
         print(f"→ Loading finetuned pipeline from: {finetuned_dir}")
         pipe = StableDiffusionXLPipeline.from_pretrained(
             finetuned_dir,
-            torch_dtype=torch_dtype,
+            torch_dtype=torch_dtype if device == "cuda" else torch.float32,
             use_safetensors=True,
-            low_cpu_mem_usage=True
         )
     else:
         print(f"→ Loading base model: {args.base_model}")
         pipe = StableDiffusionXLPipeline.from_pretrained(
             args.base_model,
-            torch_dtype=torch_dtype,
+            torch_dtype=torch_dtype if device == "cuda" else torch.float32,
             use_safetensors=True,
-            low_cpu_mem_usage=True
         )
+
         if lora_path:
             print(f"Looking for LoRA at: {lora_path}")
             if not os.path.exists(lora_path):
@@ -169,8 +173,7 @@ def main():
         else:
             print("→ No finetuned dir and no LoRA. Running base SDXL.")
 
-    pipe = accelerator.prepare(pipe)
-
+    # Light memory tweaks
     try: pipe.enable_attention_slicing()
     except Exception: pass
     try:
@@ -179,6 +182,7 @@ def main():
     except Exception:
         pass
 
+    # Try to move to requested device; on MPS OOM fallback to CPU
     try:
         pipe.to(device)
     except RuntimeError as e:
@@ -190,34 +194,27 @@ def main():
         else:
             raise
 
-    def run_one(prompt_text: str, count: int):
-        prompt_slug = slugify(prompt_text)
-        out_base = Path(BASE_DIR) / prompt_slug
-        for i in range(count):
-            seed_i = (args.seed or 0) + i
-            gen = torch.Generator(device=device).manual_seed(seed_i)
-            out = pipe(
-                prompt_text,
-                num_inference_steps=args.steps,
-                guidance_scale=args.scale,
-                generator=gen,
-                height=args.height,
-                width=args.width,
-            )
-            image = out.images[0]
-            save_path = save_image(image, out_base, prefix="sdxl_ft")
-            print(f"{prompt_text} (seed={seed_i}) → {save_path}")
+    # Inference
+    gen = None
+    if args.seed is not None:
+        gen = torch.Generator(device=device).manual_seed(args.seed)
 
-    if args.use_prompts:
-        for p_text, p_count in PROMPTS:
-            run_one(p_text, p_count)
-        return
+    out = pipe(
+        args.prompt,
+        num_inference_steps=args.steps,
+        guidance_scale=args.scale,
+        generator=gen,
+        height=args.height,
+        width=args.width,   # crucial: avoids 1024×1024 default OOM on MPS
+    )
 
-    run_one(args.prompt, args.count)
+    image = out.images[0]
+
+    prompt_slug = slugify(prompt)
+    save_path = save_image(image, Path(BASE_DIR) / prompt_slug, prefix="sdxl_ft")
+    print(f"Saved image to: {save_path}")
 
 if __name__ == "__main__":
     main()
-
-
 
 

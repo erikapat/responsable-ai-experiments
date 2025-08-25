@@ -1,4 +1,8 @@
 # compare_2025_t2i.py
+from diffusers import FluxPipeline
+import modal
+from huggingface_hub import login
+#app = modal.App("your-app-name")  # replace with your desired app name
 
 # WIP: memory problems
 import csv, time, gc, random
@@ -6,7 +10,7 @@ import torch
 
 # memory salvation
 import os, pathlib
-cache_root = pathlib.Path("hf_cache").resolve()
+cache_root = pathlib.Path("../hf_cache").resolve()
 (cache_root / "hub").mkdir(parents=True, exist_ok=True)
 (cache_root / "transformers").mkdir(parents=True, exist_ok=True)
 (cache_root / "diffusers").mkdir(parents=True, exist_ok=True)
@@ -21,7 +25,7 @@ os.environ["HF_HUB_DISABLE_XET"] = "1"  # belt & suspenders
 
 
 
-from huggingface_hub import login
+
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 login(token=HF_TOKEN)
@@ -33,7 +37,7 @@ PROMPTS = [
     "A portrait photo of a productive person",
 ]
 N_PER_PROMPT = 6  # like WaPo: 7–10; adjust for your GPU
-OUTROOT = pathlib.Path("t2i_2025_comparison")
+OUTROOT = pathlib.Path("../t2i_2025_comparison")
 OUTROOT.mkdir(exist_ok=True)
 
 # memory knobs
@@ -70,6 +74,7 @@ def get_logger(path: pathlib.Path):
 # ---------- FLUX.1-dev (Black Forest Labs) ----------
 # Model card + diffusers usage: black-forest-labs/FLUX.1-dev  (requires accepting license on HF)
 # Docs: https://huggingface.co/black-forest-labs/FLUX.1-dev  | Diffusers Flux pipeline: https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux
+#@app.function(gpu="A100")
 def run_flux(prompts, outroot, height=1024, width=1024, steps=40, guidance=3.5):
 
     # On MPS: use the smaller schnell; on CUDA: use dev
@@ -80,7 +85,7 @@ def run_flux(prompts, outroot, height=1024, width=1024, steps=40, guidance=3.5):
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.float16 if device == "cuda" else torch.float32
 
-    from diffusers import FluxPipeline
+
     pipe = FluxPipeline.from_pretrained(
         use_repo,
         torch_dtype=torch.float32,   # MPS-safe
@@ -209,8 +214,11 @@ def run_hidream(prompts, outroot, height=1024, width=1024, steps=30, guidance=4.
 # ---------- Run ----------
 #run_flux(PROMPTS, OUTROOT, height=1024, width=1024, steps=40, guidance=3.5)
 #run_flux(PROMPTS, OUTROOT, height=768, width=768, steps=30, guidance=3.5)
-run_flux(PROMPTS, OUTROOT, height=256, width=256, steps=20, guidance=3.5)
-run_hidream(PROMPTS, OUTROOT, height=1024, width=1024, steps=30, guidance=4.0)
+#@app.local_entrypoint()
+def main():
+    print("Starting remote run_flux on Modal...")
+    run_flux(PROMPTS, OUTROOT, height=256, width=256, steps=20, guidance=3.5)
+    #run_hidream(PROMPTS, OUTROOT, height=1024, width=1024, steps=30, guidance=4.0)
 
-print(f"\n Done. Check: {OUTROOT.resolve()}")
-print("CSV logs: flux1_dev.csv, hidream_i1_full.csv")
+    print(f"\n Done. Check: {OUTROOT.resolve()}")
+    print("CSV logs: flux1_dev.csv, hidream_i1_full.csv")

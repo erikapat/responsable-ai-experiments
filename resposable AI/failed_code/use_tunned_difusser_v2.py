@@ -213,9 +213,12 @@ if __name__ == "__main__":
 
 '''
 RUN WITH:
-python use_tunned_difusser_v2.py \
-  --prompts Toys in Iraq||"A portrait photo of a person at social services \
+python resposable\ AI/use_tunned_difusser_v2.py \
+  --prompts Toys in Iraq||A productive person"||"A portrait photo of a person at social services|| \
   --counts "2||3||1" \
   --seed 123 --steps 40 --width 768 --height 768
+  
+python use_tunned_difusser_v2.py  --prompt "Toys in Iraq" --count 1 --steps 40 --width 768 --height 768 --scale 6.5 --seed 123
+
 '''
 
